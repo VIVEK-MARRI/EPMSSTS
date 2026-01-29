@@ -205,3 +205,12 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# EPMSSTS Project Specific
+outputs/*.wav
+outputs/*.mp3
+outputs/*.flac
+!outputs/README.md
+models/
+.cache/
+
