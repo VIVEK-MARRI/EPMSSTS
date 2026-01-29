@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, status, Form
 from fastapi.responses import JSONResponse, Response, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from epmssts.services.stt.transcriber import SpeechToTextService, TranscriptionResult
 from epmssts.services.stt.audio_handler import preprocess_audio_bytes
@@ -60,6 +61,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="EPMSSTS API", version="0.1.0", lifespan=lifespan)
+
+# Add CORS middleware to allow frontend access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins during development
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
