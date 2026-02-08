@@ -3,12 +3,22 @@ Integration tests for API endpoints.
 """
 
 import io
+from contextlib import asynccontextmanager
 import pytest
-from httpx import AsyncClient
+from httpx import AsyncClient, ASGITransport
 import numpy as np
 import soundfile as sf
 
 from epmssts.api.main import app
+
+
+@asynccontextmanager
+async def get_test_client(**kwargs):
+    """Create an AsyncClient bound to the FastAPI ASGI app with lifespan."""
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test", **kwargs) as client:
+            yield client
 
 
 @pytest.fixture
@@ -24,7 +34,7 @@ def sample_audio_bytes():
 @pytest.mark.asyncio
 async def test_health_endpoint():
     """Test health check endpoint."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
+    async with get_test_client() as client:
         response = await client.get("/health")
         assert response.status_code == 200
         data = response.json()
@@ -34,7 +44,7 @@ async def test_health_endpoint():
 @pytest.mark.asyncio
 async def test_stt_transcribe_endpoint(sample_audio_bytes):
     """Test STT transcribe endpoint."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
+    async with get_test_client() as client:
         files = {"file": ("test.wav", sample_audio_bytes, "audio/wav")}
         response = await client.post("/stt/transcribe", files=files)
         
@@ -49,7 +59,7 @@ async def test_stt_transcribe_endpoint(sample_audio_bytes):
 @pytest.mark.asyncio
 async def test_emotion_detect_endpoint(sample_audio_bytes):
     """Test emotion detection endpoint."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
+    async with get_test_client() as client:
         files = {"file": ("test.wav", sample_audio_bytes, "audio/wav")}
         response = await client.post("/emotion/detect", files=files)
         
@@ -64,7 +74,7 @@ async def test_emotion_detect_endpoint(sample_audio_bytes):
 @pytest.mark.asyncio
 async def test_dialect_detect_endpoint():
     """Test dialect detection endpoint."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
+    async with get_test_client() as client:
         response = await client.post(
             "/dialect/detect",
             params={"transcript": "ra emo test"}
@@ -79,7 +89,7 @@ async def test_dialect_detect_endpoint():
 @pytest.mark.asyncio
 async def test_translate_endpoint():
     """Test translation endpoint."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
+    async with get_test_client() as client:
         payload = {
             "text": "Hello world",
             "source_lang": "en",
@@ -97,7 +107,7 @@ async def test_translate_endpoint():
 @pytest.mark.asyncio
 async def test_tts_synthesize_endpoint():
     """Test TTS synthesis endpoint."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
+    async with get_test_client() as client:
         payload = {
             "text": "Hello world",
             "language": "en",
@@ -115,7 +125,7 @@ async def test_tts_synthesize_endpoint():
 @pytest.mark.asyncio
 async def test_translate_speech_endpoint(sample_audio_bytes):
     """Test end-to-end speech translation endpoint."""
-    async with AsyncClient(app=app, base_url="http://test", timeout=30.0) as client:
+    async with get_test_client(timeout=30.0) as client:
         files = {"file": ("test.wav", sample_audio_bytes, "audio/wav")}
         data = {"target_lang": "hi"}
         response = await client.post("/translate/speech", files=files, data=data)

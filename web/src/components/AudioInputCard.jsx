@@ -70,9 +70,27 @@ export default function AudioInputCard({
               value={targetLang}
               onChange={(event) => setTargetLang(event.target.value)}
             >
-              <option value="en">English</option>
-              <option value="te">Telugu</option>
-              <option value="hi">Hindi</option>
+              <optgroup label="European Languages">
+                <option value="en">🇬🇧 English</option>
+                <option value="es">🇪🇸 Spanish</option>
+                <option value="fr">🇫🇷 French</option>
+                <option value="de">🇩🇪 German</option>
+                <option value="it">🇮🇹 Italian</option>
+                <option value="pt">🇵🇹 Portuguese</option>
+              </optgroup>
+              <optgroup label="Other Languages">
+                <option value="ru">🇷🇺 Russian</option>
+                <option value="ja">🇯🇵 Japanese</option>
+                <option value="zh">🇨🇳 Chinese</option>
+                <option value="ar">🇸🇦 Arabic</option>
+              </optgroup>
+              <optgroup label="Indian Languages">
+                <option value="hi">🇮🇳 Hindi</option>
+                <option value="te">🇮🇳 Telugu</option>
+                <option value="ta">🇮🇳 Tamil</option>
+                <option value="kn">🇮🇳 Kannada</option>
+                <option value="ml">🇮🇳 Malayalam</option>
+              </optgroup>
             </select>
           </label>
           <label className="text-xs text-white/60">

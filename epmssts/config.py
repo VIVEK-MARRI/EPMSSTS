@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     log_format: str = "json"  # "json" or "text"
     
     # CORS Settings
-    cors_origins: list[str] = ["http://localhost:8501", "http://127.0.0.1:8501"]
+    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"]
     
     # Rate Limiting
     rate_limit_enabled: bool = False

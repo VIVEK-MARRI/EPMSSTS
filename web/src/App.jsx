@@ -7,7 +7,7 @@ import AnalysisPanel from "./components/AnalysisPanel";
 import Stepper from "./components/Stepper";
 import ModelStatusCard from "./components/ModelStatusCard";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const DEFAULT_METADATA = {
   duration: "--",
@@ -17,8 +17,20 @@ const DEFAULT_METADATA = {
 
 const LANGUAGE_MAP = {
   en: "English",
+  es: "Spanish",
+  fr: "French",
+  de: "German",
+  it: "Italian",
+  pt: "Portuguese",
+  ru: "Russian",
+  ja: "Japanese",
+  zh: "Chinese",
+  ar: "Arabic",
   hi: "Hindi",
-  te: "Telugu"
+  te: "Telugu",
+  ta: "Tamil",
+  kn: "Kannada",
+  ml: "Malayalam"
 };
 
 export default function App() {
@@ -50,16 +62,34 @@ export default function App() {
     const checkHealth = async () => {
       try {
         console.log('Checking backend health at:', `${API_BASE}/health`);
-        const res = await fetch(`${API_BASE}/health`);
-        console.log('Health check response:', res.status, res.ok);
-        setOnline(res.ok);
+        const res = await fetch(`${API_BASE}/health`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          mode: 'cors'
+        });
+        console.log('Health check response:', res.status, res.ok, res.statusText);
+        
+        if (res.ok) {
+          const data = await res.json();
+          console.log('Health data:', data);
+          setOnline(true);
+        } else {
+          console.error('Health check returned:', res.status);
+          setOnline(false);
+        }
       } catch (error) {
-        console.error('Health check failed:', error);
+        console.error('Health check failed:', error.message);
         setOnline(false);
       }
     };
+    
+    // Check immediately
     checkHealth();
-    const timer = setInterval(checkHealth, 15000);
+    
+    // Then check every 5 seconds instead of 15 for faster detection
+    const timer = setInterval(checkHealth, 5000);
     return () => clearInterval(timer);
   }, []);
 
@@ -265,9 +295,12 @@ export default function App() {
         if (ttsRes.ok) {
           const blob = await ttsRes.blob();
           outputAudioUrl = URL.createObjectURL(blob);
+        } else {
+          const errorText = await ttsRes.text();
+          console.warn('TTS warning (non-critical):', errorText);
         }
-      } catch {
-        outputAudioUrl = "";
+      } catch (err) {
+        console.warn('TTS error (non-critical, audio synthesis may not be available):', err);
       }
 
       setCurrentStep(5);

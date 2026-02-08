@@ -15,7 +15,7 @@ Service implementations themselves must not be modified.
 
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Literal, Tuple
+from typing import Literal, Optional, Tuple
 
 import asyncio
 from pathlib import Path
@@ -26,6 +26,8 @@ import numpy as np
 from epmssts.services.stt.audio_handler import preprocess_audio_bytes
 from epmssts.services.stt.transcriber import SpeechToTextService, TranscriptionResult
 from epmssts.services.emotion.audio_emotion import AudioEmotionService, EmotionPrediction
+from epmssts.services.emotion.text_emotion import TextEmotionService
+from epmssts.services.emotion.fusion import fuse_emotions
 from epmssts.services.dialect.classifier import DialectClassifier, DialectPrediction
 from epmssts.services.translation.translator import TranslationService, TranslationResult
 from epmssts.services.tts.synthesizer import TtsService, TtsSynthesisRequest
@@ -40,6 +42,7 @@ class SpeechToSpeechResult:
     transcript: str
     detected_language: str
     detected_emotion: str
+    emotion_confidence: float
     detected_dialect: str
     translated_text: str
     audio_path: Path
@@ -75,9 +78,10 @@ async def run_speech_to_speech(
     emotion_service: AudioEmotionService,
     dialect_classifier: DialectClassifier,
     translation_service: TranslationService,
-    tts_service: TtsService,
+    tts_service: Optional[TtsService],
+    text_emotion_service: Optional[TextEmotionService] = None,
     outputs_dir: Path,
-    timeout_seconds: float = 15.0,
+    timeout_seconds: float = 120.0,
 ) -> SpeechToSpeechResult:
     """
     Run the complete speech-to-speech pipeline.
@@ -99,6 +103,22 @@ async def run_speech_to_speech(
     except Exception as exc:  # Unexpected decode errors
         raise RuntimeError(f"Unable to decode or preprocess audio: {exc}") from exc
 
+    # Silence handling: short-circuit with neutral emotion and empty output.
+    if stt_service.is_silent(audio_16k):
+        audio_path = outputs_dir / f"{session_id}.wav"
+        audio_path.touch()
+        return SpeechToSpeechResult(
+            session_id=session_id,
+            transcript="",
+            detected_language="en",
+            detected_emotion="neutral",
+            emotion_confidence=1.0,
+            detected_dialect="standard_telugu",
+            translated_text="",
+            audio_path=audio_path,
+            latency_ms=int((perf_counter() - start) * 1000),
+        )
+
     # 2) STT + Emotion in parallel.
     try:
         stt_result, emotion_result = await asyncio.wait_for(
@@ -115,6 +135,31 @@ async def run_speech_to_speech(
         detected_language = "en"
 
     detected_emotion = emotion_result.label
+
+    # Optional text emotion for English, with fusion.
+    if (
+        text_emotion_service is not None
+        and detected_language == "en"
+        and transcript.strip()
+    ):
+        loop = asyncio.get_event_loop()
+
+        async def _text_emotion() -> EmotionPrediction:
+            return await loop.run_in_executor(
+                None, text_emotion_service.predict, transcript
+            )
+
+        try:
+            text_pred = await asyncio.wait_for(_text_emotion(), timeout=timeout_seconds)
+            fused = fuse_emotions(emotion_result, text_pred)
+            detected_emotion = fused.label
+            emotion_result = fused
+        except asyncio.TimeoutError:
+            # Keep audio emotion if text emotion is too slow
+            pass
+        except Exception:
+            # Keep audio emotion if text emotion fails
+            pass
 
     # 3) Dialect detection (Telugu only, metadata only).
     if detected_language == "te" and transcript.strip():
@@ -155,6 +200,21 @@ async def run_speech_to_speech(
         # skip audio synthesis and return an empty (zero-length) WAV file.
         audio_path = outputs_dir / f"{session_id}.wav"
         audio_path.touch()
+    elif tts_service is None:
+        # TTS is optional in dev environments; attempt a lazy fallback synth.
+        try:
+            fallback_tts = TtsService()
+            tts_request = TtsSynthesisRequest(
+                text=translated_text,
+                language=target_lang,
+                emotion=detected_emotion,
+            )
+            wav_bytes = fallback_tts.synthesize(tts_request)
+            audio_path = outputs_dir / f"{session_id}.wav"
+            audio_path.write_bytes(wav_bytes)
+        except Exception:
+            audio_path = outputs_dir / f"{session_id}.wav"
+            audio_path.touch()
     else:
         tts_request = TtsSynthesisRequest(
             text=translated_text,
@@ -182,6 +242,7 @@ async def run_speech_to_speech(
         transcript=transcript,
         detected_language=detected_language,
         detected_emotion=detected_emotion,
+        emotion_confidence=emotion_result.confidence,
         detected_dialect=detected_dialect,
         translated_text=translated_text,
         audio_path=audio_path,

@@ -66,19 +66,18 @@ services:
           cpus: '2'
           memory: 4G
 
-  # Frontend Service
+  # React Frontend Service
   frontend:
     build:
-      context: .
+      context: ./web
       dockerfile: Dockerfile
     container_name: epmssts-frontend
-    command: streamlit run frontend/app.py --server.port=8501 --server.address=0.0.0.0
     ports:
-      - "8501:8501"
+      - "5173:5173"
     depends_on:
       - api
     environment:
-      BACKEND_BASE_URL: http://api:8000
+      VITE_API_URL: http://localhost:8000
     networks:
       - epmssts-network
 

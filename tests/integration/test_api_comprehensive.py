@@ -6,12 +6,22 @@ Tests complete pipeline and all endpoints
 import asyncio
 import io
 import json
+from contextlib import asynccontextmanager
 import pytest
-from httpx import AsyncClient
+from httpx import AsyncClient, ASGITransport
 import numpy as np
 import soundfile as sf
 
 from epmssts.api.main import app
+
+
+@asynccontextmanager
+async def get_test_client(**kwargs):
+    """Create an AsyncClient bound to the FastAPI ASGI app with lifespan."""
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test", **kwargs) as client:
+            yield client
 
 
 @pytest.fixture
@@ -49,7 +59,7 @@ class TestHealthEndpoints:
     @pytest.mark.asyncio
     async def test_health_check_status(self):
         """Test health check returns ok status."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             response = await client.get("/health")
             assert response.status_code == 200
             data = response.json()
@@ -58,7 +68,7 @@ class TestHealthEndpoints:
     @pytest.mark.asyncio
     async def test_health_check_services(self):
         """Test health check reports service availability."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             response = await client.get("/health")
             data = response.json()
             
@@ -77,7 +87,7 @@ class TestSTTEndpoints:
     @pytest.mark.asyncio
     async def test_transcribe_with_valid_audio(self, sample_audio_bytes):
         """Test STT transcription with valid audio."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             files = {"file": ("test.wav", sample_audio_bytes, "audio/wav")}
             response = await client.post("/stt/transcribe", files=files)
             
@@ -89,7 +99,7 @@ class TestSTTEndpoints:
     @pytest.mark.asyncio
     async def test_transcribe_empty_file(self):
         """Test STT with empty audio file."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             files = {"file": ("empty.wav", b"", "audio/wav")}
             response = await client.post("/stt/transcribe", files=files)
             
@@ -99,7 +109,7 @@ class TestSTTEndpoints:
     @pytest.mark.asyncio
     async def test_transcribe_missing_file(self):
         """Test STT without file upload."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             response = await client.post("/stt/transcribe")
             
             # Should return 422 (unprocessable entity)
@@ -112,7 +122,7 @@ class TestEmotionEndpoints:
     @pytest.mark.asyncio
     async def test_emotion_detect_with_valid_audio(self, sample_audio_bytes):
         """Test emotion detection with valid audio."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             files = {"file": ("test.wav", sample_audio_bytes, "audio/wav")}
             response = await client.post("/emotion/detect", files=files)
             
@@ -125,7 +135,7 @@ class TestEmotionEndpoints:
     @pytest.mark.asyncio
     async def test_emotion_analyze_compatibility(self, sample_audio_bytes):
         """Test emotion/analyze endpoint (frontend compatible)."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             files = {"file": ("test.wav", sample_audio_bytes, "audio/wav")}
             response = await client.post("/emotion/analyze", files=files)
             
@@ -137,7 +147,7 @@ class TestEmotionEndpoints:
     @pytest.mark.asyncio
     async def test_emotion_valid_range(self, sample_audio_bytes):
         """Test emotion confidence is in valid range."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             files = {"file": ("test.wav", sample_audio_bytes, "audio/wav")}
             response = await client.post("/emotion/detect", files=files)
             
@@ -152,7 +162,7 @@ class TestDialectEndpoints:
     @pytest.mark.asyncio
     async def test_dialect_detection_endpoint(self, sample_audio_bytes):
         """Test dialect detection endpoint."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             files = {"file": ("test.wav", sample_audio_bytes, "audio/wav")}
             response = await client.post("/dialect/detect", files=files)
             
@@ -166,7 +176,7 @@ class TestTranslationEndpoints:
     @pytest.mark.asyncio
     async def test_translate_english_to_hindi(self):
         """Test text translation from English to Hindi."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             payload = {
                 "text": "Hello, how are you?",
                 "source_lang": "en",
@@ -182,7 +192,7 @@ class TestTranslationEndpoints:
     @pytest.mark.asyncio
     async def test_translate_identity(self):
         """Test translation to same language (should be identity)."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             text = "Hello world"
             payload = {
                 "text": text,
@@ -199,7 +209,7 @@ class TestTranslationEndpoints:
     @pytest.mark.asyncio
     async def test_translate_invalid_language(self):
         """Test translation with invalid language code."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             payload = {
                 "text": "Hello",
                 "source_lang": "xx",
@@ -213,7 +223,7 @@ class TestTranslationEndpoints:
     @pytest.mark.asyncio
     async def test_translate_empty_text(self):
         """Test translation with empty text."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             payload = {
                 "text": "",
                 "source_lang": "en",
@@ -231,7 +241,7 @@ class TestTTSEndpoints:
     @pytest.mark.asyncio
     async def test_tts_synthesis(self):
         """Test TTS synthesis endpoint."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             payload = {
                 "text": "Hello world",
                 "emotion": "happy",
@@ -245,7 +255,7 @@ class TestTTSEndpoints:
     @pytest.mark.asyncio
     async def test_tts_with_invalid_emotion(self):
         """Test TTS with invalid emotion."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             payload = {
                 "text": "Hello",
                 "emotion": "invalid_emotion",
@@ -263,7 +273,7 @@ class TestPipelineEndpoints:
     @pytest.mark.asyncio
     async def test_speech_to_speech_pipeline(self, sample_audio_bytes):
         """Test complete speech-to-speech pipeline."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             files = {"file": ("test.wav", sample_audio_bytes, "audio/wav")}
             data = {
                 "target_lang": "hi",
@@ -287,7 +297,7 @@ class TestOutputEndpoint:
     @pytest.mark.asyncio
     async def test_output_nonexistent_file(self):
         """Test retrieving non-existent output file."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             response = await client.get("/output/nonexistent.wav")
             
             # Should return 404 or similar
@@ -300,7 +310,7 @@ class TestAPIErrorHandling:
     @pytest.mark.asyncio
     async def test_invalid_endpoint(self):
         """Test calling non-existent endpoint."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             response = await client.get("/nonexistent")
             
             assert response.status_code == 404
@@ -308,7 +318,7 @@ class TestAPIErrorHandling:
     @pytest.mark.asyncio
     async def test_wrong_method(self):
         """Test using wrong HTTP method."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
+        async with get_test_client() as client:
             response = await client.get("/translate")  # Should be POST
             
             assert response.status_code == 405  # Method not allowed
@@ -317,7 +327,7 @@ class TestAPIErrorHandling:
 @pytest.mark.asyncio
 async def test_concurrent_requests(sample_audio_bytes):
     """Test handling multiple concurrent requests."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
+    async with get_test_client() as client:
         # Make multiple concurrent health check requests
         tasks = []
         for _ in range(5):

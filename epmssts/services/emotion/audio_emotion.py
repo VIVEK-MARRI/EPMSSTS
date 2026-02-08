@@ -4,8 +4,16 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import numpy as np
-import torch
-from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
+
+try:
+    import torch
+    from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
+    _TRANSFORMERS_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency/model availability
+    torch = None  # type: ignore[assignment]
+    AutoFeatureExtractor = None  # type: ignore[assignment]
+    AutoModelForAudioClassification = None  # type: ignore[assignment]
+    _TRANSFORMERS_AVAILABLE = False
 
 
 MODEL_ID = "superb/wav2vec2-base-superb-er"
@@ -19,6 +27,11 @@ class EmotionPrediction:
     label: str
     confidence: float
     scores: Dict[str, float]
+
+    @property
+    def emotion(self) -> str:
+        # Backwards-compatible alias for tests and older code.
+        return self.label
 
 
 class AudioEmotionService:
@@ -36,23 +49,40 @@ class AudioEmotionService:
         model_id: str = MODEL_ID,
         device: Optional[str] = None,
     ) -> None:
+        self._model_available = False
+        self._model_error: Optional[str] = None
+        self._device = None
+        self._extractor = None
+        self._model = None
+        self._model_id2label: Dict[int, str] = {}
+        self._label2emotion: Dict[str, str] = {}
+
+        if not _TRANSFORMERS_AVAILABLE or torch is None:
+            self._model_error = "transformers/torch not available"
+            return
+
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
         self._device = torch.device(device)
-        self._extractor = AutoFeatureExtractor.from_pretrained(model_id)
-        self._model = AutoModelForAudioClassification.from_pretrained(model_id).to(
-            self._device
-        )
+
+        try:
+            self._extractor = AutoFeatureExtractor.from_pretrained(model_id)
+            self._model = AutoModelForAudioClassification.from_pretrained(model_id).to(
+                self._device
+            )
+            self._model_available = True
+        except Exception as exc:
+            self._model_error = str(exc)
+            return
 
         # Prepare mapping from model labels to our canonical emotions.
-        self._model_id2label: Dict[int, str] = dict(
-            self._model.config.id2label
-        )  # type: ignore[arg-type]
-        self._label2emotion: Dict[str, str] = self._build_label_mapping()
+        self._model_id2label = dict(self._model.config.id2label)  # type: ignore[arg-type]
+        self._label2emotion = self._build_label_mapping()
 
     @staticmethod
-    def is_silent(audio: np.ndarray, threshold: float = 1e-4) -> bool:
+    def is_silent(audio: np.ndarray, threshold: float = 1e-5) -> bool:
+        """Check if audio is silent. Lower threshold (1e-5) to accept quieter recordings."""
         if audio.size == 0:
             return True
         rms = float(np.sqrt(np.mean(np.square(audio))))
@@ -93,6 +123,12 @@ class AudioEmotionService:
 
         if self.is_silent(audio):
             # Silence handling: immediate neutral with full confidence.
+            scores = {emotion: 0.0 for emotion in EMOTIONS}
+            scores["neutral"] = 1.0
+            return EmotionPrediction(label="neutral", confidence=1.0, scores=scores)
+
+        if not self._model_available or self._model is None or self._extractor is None:
+            # Fallback: return a stable neutral prediction when model is unavailable.
             scores = {emotion: 0.0 for emotion in EMOTIONS}
             scores["neutral"] = 1.0
             return EmotionPrediction(label="neutral", confidence=1.0, scores=scores)

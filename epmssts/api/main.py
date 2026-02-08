@@ -1,16 +1,18 @@
 from contextlib import asynccontextmanager
+import logging
 from typing import Optional
 from uuid import uuid4
 import asyncio
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, status, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, status, Form, Request
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from epmssts.services.stt.transcriber import SpeechToTextService, TranscriptionResult
 from epmssts.services.stt.audio_handler import preprocess_audio_bytes
 from epmssts.services.emotion.audio_emotion import AudioEmotionService, EmotionPrediction
+from epmssts.services.emotion.text_emotion import TextEmotionService
 from epmssts.services.dialect.classifier import DialectClassifier, DialectPrediction
 from epmssts.services.translation.translator import (
     TranslationService,
@@ -20,8 +22,11 @@ from epmssts.services.tts.synthesizer import TtsService, TtsSynthesisRequest
 from epmssts.api.pipeline import run_speech_to_speech, SpeechToSpeechResult
 
 
+logger = logging.getLogger("epmssts.api")
+
 stt_service: Optional[SpeechToTextService] = None
 emotion_service: Optional[AudioEmotionService] = None
+text_emotion_service: Optional[TextEmotionService] = None
 dialect_classifier: Optional[DialectClassifier] = None
 translation_service: Optional[TranslationService] = None
 tts_service: Optional[TtsService] = None
@@ -35,16 +40,21 @@ async def lifespan(app: FastAPI):
     Ensures the Whisper model is loaded once at startup
     and released cleanly on shutdown.
     """
-    global stt_service, emotion_service, dialect_classifier, translation_service, tts_service
+    global stt_service, emotion_service, text_emotion_service, dialect_classifier, translation_service, tts_service
     try:
         stt_service = SpeechToTextService()
         emotion_service = AudioEmotionService()
+        try:
+            text_emotion_service = TextEmotionService()
+        except Exception as exc:
+            logger.warning("Text emotion service unavailable: %s", exc)
+            text_emotion_service = None
         dialect_classifier = DialectClassifier()
         translation_service = TranslationService()
         try:
             tts_service = TtsService()
         except RuntimeError as e:
-            print(f"Warning: TTS service not available - {e}")
+            logger.warning("TTS service not available: %s", e)
             tts_service = None
     except Exception as exc:  # pragma: no cover - startup failure path
         # Fail fast if the model cannot be loaded
@@ -55,6 +65,7 @@ async def lifespan(app: FastAPI):
     # Teardown hook if we ever need explicit cleanup
     stt_service = None
     emotion_service = None
+    text_emotion_service = None
     dialect_classifier = None
     translation_service = None
     tts_service = None
@@ -90,6 +101,7 @@ async def health_check():
         "status": "ok",
         "stt_available": stt_service is not None,
         "emotion_available": emotion_service is not None,
+        "text_emotion_available": text_emotion_service is not None,
         "dialect_available": dialect_classifier is not None,
         "translation_available": translation_service is not None and translation_service._model is not None,
         "tts_available": tts_service is not None
@@ -165,11 +177,11 @@ async def transcribe_audio(
         )
 
     try:
-        result = await asyncio.wait_for(_run_transcription(), timeout=10.0)
+        result = await asyncio.wait_for(_run_transcription(), timeout=60.0)
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Transcription exceeded 10s timeout limit.",
+            detail="Transcription exceeded 60s timeout limit.",
         )
     except Exception as exc:
         raise HTTPException(
@@ -263,11 +275,11 @@ async def detect_emotion(
         )
 
     try:
-        result = await asyncio.wait_for(_run_emotion(), timeout=10.0)
+        result = await asyncio.wait_for(_run_emotion(), timeout=60.0)
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Emotion detection exceeded 10s timeout limit.",
+            detail="Emotion detection exceeded 60s timeout limit.",
         )
     except Exception as exc:
         raise HTTPException(
@@ -283,7 +295,11 @@ async def detect_emotion(
 
 
 @app.post("/dialect/detect")
-async def detect_dialect(transcript: str):
+async def detect_dialect(
+    request: Request,
+    transcript: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None, description="Optional audio file for dialect detection"),
+):
     """
     Detect Telugu dialect from a transcript string.
 
@@ -297,10 +313,81 @@ async def detect_dialect(transcript: str):
             detail="Dialect classifier is not available",
         )
 
+    if transcript is None:
+        transcript = request.query_params.get("transcript")
+
+    if transcript is None and file is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide either 'transcript' or an audio 'file'.",
+        )
+
+    resolved_transcript = transcript or ""
+
+    if file is not None:
+        if stt_service is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="STT service is required for audio-based dialect detection",
+            )
+
+        if not file.content_type.startswith("audio/"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid content type '{file.content_type}'. Expected audio/*.",
+            )
+
+        try:
+            file_bytes = await file.read()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to read uploaded file: {exc}",
+            ) from exc
+
+        if not file_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uploaded file is empty.",
+            )
+
+        try:
+            audio_16k, sample_rate = preprocess_audio_bytes(file_bytes)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unable to decode or preprocess audio: {exc}",
+            ) from exc
+
+        if stt_service.is_silent(audio_16k):
+            return {
+                "dialect": "standard_telugu",
+                "confidence": 0.5,
+            }
+
+        async def _run_transcription() -> TranscriptionResult:
+            return await asyncio.get_event_loop().run_in_executor(
+                None, stt_service.transcribe, audio_16k, sample_rate
+            )
+
+        try:
+            stt_result = await asyncio.wait_for(_run_transcription(), timeout=60.0)
+            resolved_transcript = stt_result.text
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Transcription exceeded 10s timeout limit.",
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Transcription failed: {exc}",
+            ) from exc
+
     # The endpoint assumes the transcript is Telugu; callers should only use
     # this for Telugu text. For non-Telugu text, the classifier will typically
     # fall back to `standard_telugu` with modest confidence.
-    prediction: DialectPrediction = dialect_classifier.detect(transcript)
+    prediction: DialectPrediction = dialect_classifier.detect(resolved_transcript)
     return {
         "dialect": prediction.dialect,
         "confidence": prediction.confidence,
@@ -395,11 +482,16 @@ async def synthesize_tts(
     Output:
       Raw WAV audio bytes with content-type `audio/wav`.
     """
-    if tts_service is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="TTS service is not available",
-        )
+    service = tts_service
+    if service is None:
+        # Lazy fallback init to keep endpoint working even if startup failed.
+        try:
+            service = TtsService()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"TTS service is not available: {exc}",
+            ) from exc
 
     text = payload.get("text")
     language = payload.get("language")
@@ -433,13 +525,15 @@ async def synthesize_tts(
     )
 
     try:
-        wav_bytes = tts_service.synthesize(request)
+        wav_bytes = service.synthesize(request)
     except ValueError as exc:
+        logger.error(f"TTS validation error: {exc}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
     except Exception as exc:
+        logger.error(f"TTS synthesis failed: {exc}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"TTS synthesis failed: {exc}",
@@ -468,7 +562,6 @@ async def translate_speech(
         or emotion_service is None
         or dialect_classifier is None
         or translation_service is None
-        or tts_service is None
     ):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -511,17 +604,18 @@ async def translate_speech(
             emotion_service=emotion_service,  # type: ignore[arg-type]
             dialect_classifier=dialect_classifier,  # type: ignore[arg-type]
             translation_service=translation_service,  # type: ignore[arg-type]
-            tts_service=tts_service,  # type: ignore[arg-type]
+            tts_service=tts_service,
+            text_emotion_service=text_emotion_service,
             outputs_dir=outputs_dir,
         )
 
     try:
-        result = await asyncio.wait_for(_run_pipeline(), timeout=15.0)
+        result = await asyncio.wait_for(_run_pipeline(), timeout=120.0)
     except asyncio.TimeoutError:
-        print("[WARN] /translate/speech request timed out after 15s.")
+        print("[WARN] /translate/speech request timed out after 120s.")
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="End-to-end translation exceeded 15s timeout limit.",
+            detail="End-to-end translation exceeded 120s timeout limit.",
         )
     except ValueError as exc:
         print(f"[ERROR] /translate/speech invalid request: {exc}")
@@ -543,6 +637,7 @@ async def translate_speech(
         "transcript": result.transcript,
         "detected_language": result.detected_language,
         "detected_emotion": result.detected_emotion,
+        "emotion_confidence": result.emotion_confidence,
         "detected_dialect": result.detected_dialect,
         "translated_text": result.translated_text,
         "audio_url": audio_url,
@@ -575,47 +670,14 @@ async def analyze_emotion(
     """
     Alias for /emotion/detect endpoint for frontend compatibility.
     """
-    if emotion_service is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Emotion service is not available",
-        )
-
-    file_bytes = await file.read()
-    if not file_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Uploaded file is empty.",
-        )
-
-    try:
-        audio_16k, sample_rate = preprocess_audio_bytes(file_bytes)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unable to decode or preprocess audio: {exc}",
-        ) from exc
-
-    try:
-        prediction: EmotionPrediction = emotion_service.predict(audio_16k, sample_rate)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Emotion detection failed: {exc}",
-        ) from exc
-
-    return {
-        "emotion": prediction.emotion,
-        "confidence": prediction.confidence,
-        "all_confidences": prediction.all_confidences,
-    }
+    return await detect_emotion(file)
 
 
 @app.post("/process/speech-to-speech")
 async def process_speech_to_speech(
     file: UploadFile = File(..., description="Input audio file for speech-to-speech translation"),
     target_lang: str = Form(..., description="Target language code (en, te, hi)"),
-    target_emotion: str = Form("neutral", description="Target emotion (neutral, happy, sad, angry, fearful)"),
+    target_emotion: str = Form("neutral", description="Ignored; emotion is derived from input audio"),
 ):
     """
     Complete end-to-end speech-to-speech translation pipeline.
@@ -639,79 +701,78 @@ async def process_speech_to_speech(
             detail="Required services not initialized",
         )
 
-    file_bytes = await file.read()
+    if target_lang not in {"en", "te", "hi"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Field 'target_lang' must be one of: 'en', 'te', 'hi'.",
+        )
+
+    if not file.content_type.startswith("audio/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid content type '{file.content_type}'. Expected audio/*.",
+        )
+
+    try:
+        file_bytes = await file.read()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to read uploaded file: {exc}",
+        ) from exc
+
     if not file_bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Uploaded file is empty.",
         )
 
-    try:
-        audio_16k, sample_rate = preprocess_audio_bytes(file_bytes)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unable to preprocess audio: {exc}",
-        ) from exc
+    outputs_dir = Path(__file__).resolve().parents[2] / "outputs"
+
+    async def _run_pipeline() -> SpeechToSpeechResult:
+        return await run_speech_to_speech(
+            file_bytes=file_bytes,
+            target_lang=target_lang,  # type: ignore[arg-type]
+            stt_service=stt_service,  # type: ignore[arg-type]
+            emotion_service=emotion_service,  # type: ignore[arg-type]
+            dialect_classifier=dialect_classifier,  # type: ignore[arg-type]
+            translation_service=translation_service,  # type: ignore[arg-type]
+            tts_service=tts_service,
+            text_emotion_service=text_emotion_service,
+            outputs_dir=outputs_dir,
+        )
 
     try:
-        # Step 1: Transcribe
-        stt_result: TranscriptionResult = stt_service.transcribe(audio_16k, sample_rate)
-        
-        # Step 2: Detect emotion
-        emotion_pred: EmotionPrediction = emotion_service.predict(audio_16k, sample_rate)
-        
-        # Step 3: Detect dialect
-        dialect_pred: DialectPrediction = dialect_classifier.classify(audio_16k, sample_rate)
-        
-        # Step 4: Translate
-        translation_result: TranslationResult = translation_service.translate(
-            stt_result.text,
-            target_lang=target_lang,
-            source_lang=stt_result.language,
+        result = await asyncio.wait_for(_run_pipeline(), timeout=15.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="End-to-end translation exceeded 15s timeout limit.",
         )
-        
-        # Step 5: Synthesize (if TTS available)
-        output_audio_url = None
-        if tts_service is not None:
-            try:
-                session_id = str(uuid4())
-                
-                tts_request = TtsSynthesisRequest(
-                    text=translation_result.translated_text,
-                    language=target_lang,
-                    emotion=target_emotion,
-                )
-                wav_bytes = tts_service.synthesize(tts_request)
-                
-                # Save audio
-                outputs_dir = Path(__file__).resolve().parents[2] / "outputs"
-                outputs_dir.mkdir(parents=True, exist_ok=True)
-                audio_path = outputs_dir / f"{session_id}.wav"
-                audio_path.write_bytes(wav_bytes)
-                
-                output_audio_url = f"/output/{session_id}.wav"
-            except Exception as tts_exc:
-                print(f"Warning: TTS synthesis failed: {tts_exc}")
-                # Continue without audio output
-        
-        return {
-            "transcript": stt_result.text,
-            "detected_language": stt_result.language,
-            "detected_emotion": emotion_pred.emotion,
-            "detected_dialect": dialect_pred.dialect,
-            "translated_text": translation_result.translated_text,
-            "target_language": target_lang,
-            "target_emotion": target_emotion,
-            "output_audio_url": output_audio_url,
-            "confidence": emotion_pred.confidence,
-        }
-        
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Pipeline execution failed: {exc}",
         ) from exc
+
+    output_audio_url = f"/output/{result.session_id}.wav"
+
+    return {
+        "transcript": result.transcript,
+        "detected_language": result.detected_language,
+        "detected_emotion": result.detected_emotion,
+        "detected_dialect": result.detected_dialect,
+        "translated_text": result.translated_text,
+        "target_language": target_lang,
+        "target_emotion": result.detected_emotion,
+        "output_audio_url": output_audio_url,
+        "confidence": result.emotion_confidence,
+    }
 
 
 __all__ = ["app"]
