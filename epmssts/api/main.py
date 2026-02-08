@@ -5,7 +5,7 @@ from uuid import uuid4
 import asyncio
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, status, Form, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, status, Form, Request, Body
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -396,7 +396,7 @@ async def detect_dialect(
 
 @app.post("/translate")
 async def translate(
-    payload: dict,
+    payload: dict = Body(...),
 ):
     """
     Pure text translation endpoint using NLLB-200.
@@ -467,7 +467,7 @@ async def translate(
 
 @app.post("/tts/synthesize")
 async def synthesize_tts(
-    payload: dict,
+    payload: dict = Body(...),
 ):
     """
     Emotion-conditioned TTS endpoint.

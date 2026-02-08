@@ -289,7 +289,7 @@ export default function App() {
           body: JSON.stringify({
             text: translationJson.translated_text,
             language: targetLang,
-            emotion: targetEmotion
+            emotion: emotionJson.emotion
           })
         });
         if (ttsRes.ok) {
@@ -312,7 +312,7 @@ export default function App() {
         detected_dialect: dialectJson.dialect,
         translated_text: translationJson.translated_text,
         target_language: LANGUAGE_MAP[targetLang] || targetLang,
-        target_emotion: targetEmotion,
+        target_emotion: emotionJson.emotion,
         output_audio_url: outputAudioUrl,
         confidence: emotionJson.confidence
       });
